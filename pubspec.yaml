@@ -1,0 +1,12 @@
+name: oauth
+version: 1.0.0
+author: Thuan Hu <nunobaba@gmail.com>
+description: >
+  A composable API for server-side Dart to authenticate against OAuth/OpenId 
+  providers, typically to log into Twitter and Yahoo accounts. 
+dependencies:
+  crypto: any
+  http: any
+dev_dependencies:
+  quiver: any
+  unittest: any

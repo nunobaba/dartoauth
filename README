@@ -1,0 +1,8 @@
+OAuth library for Dart
+======================
+
+A composable API for server-side Dart to authenticate against OAuth/OpenId 
+providers, typically to log into Twitter and Yahoo accounts.
+
+When creating an HTTP client class with additional functionality, one must
+extend OAuth abstract class. 
