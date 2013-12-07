@@ -12,7 +12,6 @@ import 'dart:io';
 import 'oauth.dart';
 import 'package:http/http.dart';
 import 'package:quiver/strings.dart' show isBlank;
-import 'package:unittest/mock.dart';
 
 
 /// Simple subclass of OAuth implementing all abstract getters and methods.
@@ -30,6 +29,7 @@ class MockOaClient extends OAuth {
   
   String get consumerKey => 'nHBYgYRllYSQeEhEpXzmg';
   String get consumerSecret => 'cr5F8Y2xic3qvg1jmSV7UqtLb7bRW2UBXcEjkEnk';
+  Map get xheaders => {};
   
   Future handleOauthToken(Response resp) {
     final creds = Uri.splitQueryString(resp.body);
@@ -49,15 +49,5 @@ class MockOaClient extends OAuth {
     }
   }
 }
-
-
-/// A mock OAuth provider server with the request token, authorize, and 
-/// access handler triplet to spy OAuth requests from the client and send
-/// back to it appropriate fake responses.  
-
-
-
-
-
 
 
