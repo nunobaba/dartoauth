@@ -75,8 +75,7 @@ class OAuth {
       buffer['token'] = Uri.encodeComponent(token);
       
       client.post(accessTokenUrl, 
-          headers: headAccessRequest(data),
-          fields: {'oauth_verifier': data['oauth_verifier']})
+          headers: headAccessRequest(data))
         .then((resp) {
           final data = Uri.splitQueryString(resp.body);
           if (data.containsKey('oauth_token')) {
