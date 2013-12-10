@@ -2,85 +2,184 @@ library oauth;
 
 import 'dart:async';
 import 'dart:io';
-import 'package:http/http.dart';
-import 'src/token.dart';
+import 'package:crypto/crypto.dart';
+import 'package:http/http.dart' as http;
 
-
-/** 
- * A composable API for authenticating against OAuth and OpenId providers, 
- * typically to log into Twitter and Yahoo accounts. 
+/**
+ * A general consumer client for OAuth 1.0a. 
+ * 
+ * It can whether be used right out of the box to connect to Twitter, 
+ * or customized for other providers by overriding the pair of methods:
+ * the [_headAccessRequest] method to cook parameters for the access 
+ * token and the [_processOauthToken] method to process received user key
+ * and secret. 
+ * 
+ * The first OAuth step, i.e. the request token step, is assumed to be 
+ * the same all the time.    
  */
-abstract class OAuth {
-  Uri get requestTokenUri;
-  Uri get callbackUri; 
-  Uri get authenticateUri;
-  Uri get accessTokenUri;
-  Uri get authorizeUri;
+class OAuth {
+  static const SIGNATURE_METHOD = 'HMAC-SHA1';
+  static const VERSION = '1.0';
   
-  // Application key pairs.
-  String get consumerKey;
-  String get consumerSecret;
+  String consumerKey, consumerSecret,
+         token, tokenSecret, 
+         userKey, userSecret,
+         requestTokenUrl, authorizeUrl, accessTokenUrl,
+         callbackUrl;
   
-  Token _token = new Token();
+  /// Parameters for signature base.
+  Map<String, String> buffer;
+  /// Extra request headers, as providers add their specifics.
+  Map<String, String> xheaders;
   
-  Token get token => _token;
+  http.Client client;
   
-  /// Http client for requests.
-  final Client _client = new Client();
-
-  Map<String, String> get xheaders;
-  
-  /// Handle the request of a signin using OAuth, starting at 
-  /// stage 1, acquiring a new authentication token.
-  void handleTokenRequest(HttpRequest req) {
-    _token..callbackUrl = callbackUri.toString()
-          ..consumerKey = consumerKey
-          ..consumerSecret = consumerSecret;
+  OAuth(this.consumerKey, this.consumerSecret, 
+        this.requestTokenUrl, this.authorizeUrl, this.accessTokenUrl,
+        this.callbackUrl) {
     
-    _client.post(requestTokenUri, 
-        headers: {'authorization': _token.getAuthHeader(requestTokenUri)})
+    client = new http.Client();
+    // Buffer is filled with persistent request parameters.  
+    buffer = {'version': VERSION,
+              'signature_method': SIGNATURE_METHOD,
+              'consumer_key': Uri.encodeComponent(consumerKey),
+              'callback': Uri.encodeComponent(callbackUrl)}; 
+  }
+  
+  void handleAuthorization(HttpRequest req) {
+    signBuffer(requestTokenUrl);
+
+    client.post(requestTokenUrl, 
+        headers: {
+          'Accept': '*/*',
+          'User-Agent': 'Dart authentication',
+          'Authorization': headRequest()})
       .then((resp) {
-        var data = Uri.splitQueryString(resp.body);
-        _token.token = data['oauth_token'];
-        _token.tokenSecret = data['oauth_token_secret'];
-      
-        print('#token body: ${Uri.decodeComponent(resp.body)}');
-
-        // Stage 2! redirect request to url where user acknowledges the demand. 
-        req.response.redirect(Uri.parse(
-            '${authenticateUri}?oauth_token=${_token.token}'));
-      });
-  }
-
-  /// Handle the validation of the OAuth authentication token.
-  /// This is stage 3, acquiring the authorization token to be exchanged
-  /// for the access token.
-  void handleValidToken(HttpRequest req) {
-    // The token given in stage 1 and this one returned by the provider 
-    // have to match. 
-    if (req.uri.queryParameters['oauth_token'] == _token.token) {
-      _token.verifier = req.uri.queryParameters['oauth_verifier'];
-      
-      // Some providers require specific parameters to be added.
-      final headers = {'authorization': _token.getAuthHeader(accessTokenUri)};
-      headers.addAll(xheaders);
-      
-      print('#Validation headers: ${headers}');
-      
-      _client.post(accessTokenUri, headers: headers,
-          fields: {'oauth_verifier': _token.verifier})
-        .then(handleOauthToken)
-        .then((it) => handleFinale(it, req))
-        .catchError((msg) => print(msg));
-    } else
-      throw new Exception('Request Token and verifier do NOT match.');
+        final data = Uri.splitQueryString(resp.body);
+        if (data['oauth_callback_confirmed'] == 'true') {
+          token = data['oauth_token'];
+          tokenSecret = data['oauth_token_secret'];
+          req.response.redirect(Uri.parse('$authorizeUrl?oauth_token=$token'));
+        } else {
+          print('Error: ${resp.body}');
+          return new Future.error('NO request token.');
+        }
+      })
+      .catchError((msg) => print(msg));
   }
   
-  /// Handle the response from provider, what to do with access token, 
-  /// access token secret and out of scope fields like user ID or screen name.
-  Future handleOauthToken(Response resp);
+  void handleAccess(HttpRequest req) {
+    final data = req.uri.queryParameters;
+    if (data['oauth_token'] == token) {
+      // The authorization token always get enclosed.
+      buffer['token'] = Uri.encodeComponent(token);
+      
+      client.post(accessTokenUrl, 
+          headers: headAccessRequest(data),
+          fields: {'oauth_verifier': data['oauth_verifier']})
+        .then((resp) {
+          final data = Uri.splitQueryString(resp.body);
+          if (data.containsKey('oauth_token')) {
+            processOauthToken(data, req);
+          } else { 
+            return new Future.error('NO access token');
+          }
+        })
+        .catchError((msg) {
+          print(msg);
+          req.response.close();
+        });
+      
+    } else req.response.close();
+  }
+
+  /// Arrange buffer parameters to exchange the authorization token for
+  /// the access token. Keep in mind this method is set for Twitter.
+  Map<String, String> headAccessRequest(Map data) {
+    // Renew the signature after adding token as the new parameter.
+    signBuffer(accessTokenUrl);
+
+    // Add the verifier in the header and the request body.
+    buffer['verifier'] = data['oauth_verifier'];
+    
+    return {'authorization': headRequest()};
+  }
+
+  /// Handle the process of oauth token. 
+  /// Override this for specific needs or providers. 
+  Future processOauthToken(Map data, HttpRequest req) {
+    userKey = data['oauth_token'];
+    userSecret = data['oauth_token_secret'];
+  }
   
-  /// Handle how the OAuth process ends, e.g. with a redirection to a
-  /// specific page or close the original request. 
-  Future handleFinale(data, HttpRequest request);
+  String headRequest() => 
+      'OAuth ${joinedBuffer(glue: ',', quote: true)}';
+  
+  void signBuffer(url, [String method = 'post']) {
+    // Renew timestamp and nonce.
+    _addNonceAndTimestamp();
+    // Clean buffer from any previous signature.
+    if (buffer.containsKey('signature')) 
+      buffer.remove('signature');
+    
+    // .. Build signature base.
+    final base = [method.toUpperCase(), 
+                  Uri.encodeComponent(url),
+                  Uri.encodeComponent(joinedBuffer())
+                 ].join('&');
+    
+    // .. Get signature key.
+    final cipher = 
+        '${Uri.encodeComponent(consumerSecret)}&'
+        '${userSecret != null ? Uri.encodeComponent(userSecret) : 
+           tokenSecret != null ? Uri.encodeComponent(tokenSecret) : ''}';
+    
+    // .. Sign base.
+    final hmac = new HMAC(new SHA1(), cipher.codeUnits);
+    hmac.add(base.codeUnits);
+    
+    final signature = CryptoUtils.bytesToBase64(hmac.close());
+    buffer['signature'] = Uri.encodeComponent(signature);
+  }
+
+  /// Provide a nonce and timestamp to the buffer. 
+  void _addNonceAndTimestamp() {
+    buffer['nonce'] = _nonce();
+    buffer['timestamp'] = _timestamp();
+  }
+  
+  int _nounceIncrement = 0;
+  final _shaFoundry = new SHA1();
+  
+  String _nonce() {
+    final sha = _shaFoundry.newInstance();
+    sha.add([++_nounceIncrement, new DateTime.now().millisecond]);
+    return CryptoUtils.bytesToHex(sha.close());
+  }
+  
+  String _timestamp() =>
+      (new DateTime.now().millisecondsSinceEpoch ~/ 1000).toString();
+  
+  /** 
+   * Alphabetically join keys and values of a regular map into a query string. 
+   * 
+   * The key/value pair is jointed by [pair] string, each of them glued to 
+   * the rest by [glue] with or without double quote.
+   */
+  String joinedBuffer({String eq: '=', String glue: '&', bool quote: false}) {
+    final List buf = [];
+    final q = quote ? '"' : '';
+    
+    // Keys in [parameters] need to be sorted alphabetically.  
+    buffer.keys.toList()
+      ..sort()
+      ..forEach((p) => buf.add('oauth_$p$eq$q${buffer[p]}$q'));
+    
+    return buf.join(glue);
+  }
+
+  
 }
+
+
+
