@@ -4,6 +4,8 @@ import 'dart:async';
 import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
+import 'dart:math';
+
 
 /**
  * A general consumer client for OAuth 1.0a. 
@@ -20,6 +22,10 @@ import 'package:http/http.dart' as http;
 class OAuth {
   static const SIGNATURE_METHOD = 'HMAC-SHA1';
   static const VERSION = '1.0';
+  // Values part of the OAuth process, that needs to be prefixed by 'oauth_'.
+  static const OAUTH_VALUES = const ['version', 'verifier', 'timestamp', 
+                                     'nonce', 'signature_method', 'signature', 
+                                     'token', 'consumer_key', 'callback'];
   
   String consumerKey, consumerSecret,
          token, tokenSecret, 
@@ -39,14 +45,25 @@ class OAuth {
         this.callbackUrl) {
     
     client = new http.Client();
-    // Buffer is filled with persistent request parameters.  
-    buffer = {'version': VERSION,
-              'signature_method': SIGNATURE_METHOD,
-              'consumer_key': Uri.encodeComponent(consumerKey),
-              'callback': Uri.encodeComponent(callbackUrl)}; 
+    
+    // Start with a default buffer.
+    supplyBuffer();
   }
   
+  /// Reset buffer to default values.   
+  void supplyBuffer() {
+    buffer = {'version': VERSION,
+              'signature_method': SIGNATURE_METHOD,
+              'consumer_key': Uri.encodeComponent(consumerKey)};
+    if (userKey != null) 
+      buffer['token'] = userKey;
+  }
+  
+  /// Request an authorization token.
   void handleAuthorization(HttpRequest req) {
+    // The authorization process needs the callback.
+    buffer['callback'] = Uri.encodeComponent(callbackUrl);
+    
     signBuffer(requestTokenUrl);
 
     client.post(requestTokenUrl, 
@@ -68,6 +85,7 @@ class OAuth {
       .catchError((msg) => print(msg));
   }
   
+  /// Exchange the authorization token for an access token.
   void handleAccess(HttpRequest req) {
     final data = req.uri.queryParameters;
     if (data['oauth_token'] == token) {
@@ -150,10 +168,21 @@ class OAuth {
   int _nounceIncrement = 0;
   final _shaFoundry = new SHA1();
   
+//  String _nonce() {
+//    final sha = _shaFoundry.newInstance();
+//    sha.add([++_nounceIncrement, new DateTime.now().millisecond]);
+//    return CryptoUtils.bytesToHex(sha.close());
+//  }
+  static const String _CHARS = 'abcdefghijklmnopqrstuvwxyz'
+                               'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+                               '0123456789';
+  final _rand = new Random();
+  final _seq = new List(32);
+  
   String _nonce() {
-    final sha = _shaFoundry.newInstance();
-    sha.add([++_nounceIncrement, new DateTime.now().millisecond]);
-    return CryptoUtils.bytesToHex(sha.close());
+    token(_) => 
+        _CHARS[_rand.nextInt(1000) * _rand.nextInt(1000) % _CHARS.length];
+    return _seq.map(token).toList().join('');
   }
   
   String _timestamp() =>
@@ -170,10 +199,10 @@ class OAuth {
     final q = quote ? '"' : '';
     
     // Keys in [parameters] need to be sorted alphabetically.  
-    buffer.keys.toList()
-      ..sort()
-      ..forEach((p) => buf.add('oauth_$p$eq$q${buffer[p]}$q'));
+    buffer.keys.toList().forEach((p) => buf.add(
+        '${OAUTH_VALUES.contains(p) ? 'oauth_$p' : p}$eq$q${buffer[p]}$q'));
     
+    buf.sort();
     return buf.join(glue);
   }
 
